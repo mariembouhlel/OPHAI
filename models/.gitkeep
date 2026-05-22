@@ -1,0 +1,6 @@
+Placez ici les 4 fichiers .pth issus du notebook 06 (Kaggle output) :
+
+  resnet50_advanced.pth
+  efficientnet_b0_advanced.pth
+  densenet121_advanced.pth
+  resnet18_advanced.pth

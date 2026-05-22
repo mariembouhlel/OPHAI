@@ -1,6 +1,6 @@
 """
 RetinAI — Systeme de Diagnostic de Retinopathie Diabetique
-Ensemble de 4 CNNs (ResNet50 · EfficientNet-B0 · DenseNet121 · ResNet18)
+EfficientNet-B0 — entraine sur APTOS 2019 avec split train/val/test equilibre
 Grad-CAM · TTA × 4 vues · Rapport PDF telechargeable
 """
 
@@ -30,17 +30,16 @@ st.set_page_config(
 
 # ─── Constantes ───────────────────────────────────────────────────────────────
 CLASSES     = ["No DR", "Mild", "Moderate", "Severe", "Proliferative DR"]
-CLASSES_FR  = ["Absence de RD", "Legere", "Moderee", "Severe", "Proliferative"]  # sans accents pour PDF
-CLASSES_UI  = ["Absence de RD", "Légère", "Modérée", "Sévère", "Proliférative"]  # avec accents pour UI
+CLASSES_FR  = ["Absence de RD", "Legere", "Moderee", "Severe", "Proliferative"]
+CLASSES_UI  = ["Absence de RD", "Légère", "Modérée", "Sévère", "Proliférative"]
 MODEL_DIR   = Path(__file__).parent / "models"
-MODEL_NAMES = ["resnet50", "efficientnet_b0", "densenet121", "resnet18"]
+MODEL_NAMES = ["efficientnet_b0"]
 IMG_SIZE    = 224
 MEAN        = [0.485, 0.456, 0.406]
 STD         = [0.229, 0.224, 0.225]
 
 VAL_ACCS = {
-    "resnet50": 0.992, "efficientnet_b0": 0.992,
-    "densenet121": 0.990, "resnet18": 0.990,
+    "efficientnet_b0": 0.990,
 }
 
 SEV = {
@@ -69,8 +68,11 @@ EVAL_TF = transforms.Compose([
 
 # ─── Session state ─────────────────────────────────────────────────────────────
 for key, default in {
-    "pred": None, "ensemble_probs": None, "per_model_probs": None,
-    "analysis_done": False, "last_file_id": None,
+    "pred":           None,
+    "ensemble_probs": None,
+    "per_model_probs": None,
+    "analysis_done":  False,
+    "last_file_id":   None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -122,6 +124,11 @@ st.markdown("""
     border-radius: 10px; padding: 0.8rem 1.2rem;
     font-size: 0.88rem; color: #856404; margin-bottom: 1rem;
 }
+.role-card {
+    border-radius: 16px; padding: 2rem 1.5rem;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+    text-align: center; margin-bottom: 1rem;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -131,18 +138,9 @@ st.markdown("""
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_model(name: str) -> nn.Module:
-    if name == "resnet50":
-        m = models.resnet50(weights=None)
-        m.fc = nn.Linear(m.fc.in_features, 5)
-    elif name == "efficientnet_b0":
+    if name == "efficientnet_b0":
         m = models.efficientnet_b0(weights=None)
         m.classifier[1] = nn.Linear(m.classifier[1].in_features, 5)
-    elif name == "densenet121":
-        m = models.densenet121(weights=None)
-        m.classifier = nn.Linear(m.classifier.in_features, 5)
-    elif name == "resnet18":
-        m = models.resnet18(weights=None)
-        m.fc = nn.Linear(m.fc.in_features, 5)
     else:
         raise ValueError(f"Modele inconnu : {name}")
     return m
@@ -153,7 +151,7 @@ def load_models():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     loaded, missing = {}, []
     for name in MODEL_NAMES:
-        path = MODEL_DIR / f"{name}_advanced.pth"
+        path = MODEL_DIR / f"{name}_data2.pth"
         if path.exists():
             try:
                 m = build_model(name)
@@ -169,7 +167,6 @@ def load_models():
 
 
 def demo_predict(img_pil: Image.Image) -> tuple:
-    """Prédiction de démonstration (sans vrais modèles)."""
     np.random.seed(int(np.array(img_pil.resize((8, 8))).mean()))
     raw = np.random.dirichlet(alpha=[5, 1, 2, 0.5, 0.5])
     pred = int(raw.argmax())
@@ -200,7 +197,6 @@ def predict(img_pil: Image.Image, loaded_models: dict, device: torch.device) -> 
     return pred, ensemble, per_model
 
 
-# ─── Grad-CAM ─────────────────────────────────────────────────────────────────
 class GradCAM:
     def __init__(self, model: nn.Module, target_layer: nn.Module):
         self.model = model
@@ -227,9 +223,7 @@ class GradCAM:
 
 
 def get_target_layer(model: nn.Module, name: str) -> nn.Module:
-    if name in ("resnet50", "resnet18"):  return model.layer4[-1]
-    if name == "densenet121":             return model.features.denseblock4  # pas features[-1] → inplace relu bug
-    if name == "efficientnet_b0":         return model.features[-1]
+    if name == "efficientnet_b0": return model.features[-1]
     raise ValueError(name)
 
 
@@ -262,7 +256,6 @@ def compute_gradcam_fig(
                       fontweight="bold", color="#1a1a2e")
     axes[1].axis("off")
 
-    # Colorbar
     sm = plt.cm.ScalarMappable(cmap="jet", norm=plt.Normalize(0, 1))
     cbar = fig.colorbar(sm, ax=axes[1], fraction=0.035, pad=0.02)
     cbar.set_label("Activation", fontsize=8, color="#555")
@@ -278,7 +271,6 @@ def compute_gradcam_fig(
 
 
 def demo_gradcam_fig(img_pil: Image.Image) -> io.BytesIO:
-    """Grad-CAM factice pour le mode démo."""
     arr = np.array(img_pil.resize((IMG_SIZE, IMG_SIZE))).astype(float) / 255.0
     cam = arr.mean(axis=2)
     cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-8)
@@ -296,7 +288,6 @@ def demo_gradcam_fig(img_pil: Image.Image) -> io.BytesIO:
     return buf
 
 
-# ─── Graphique de confiance ───────────────────────────────────────────────────
 def plot_confidence(ensemble_probs: np.ndarray, pred: int) -> io.BytesIO:
     colors = ["#27ae60", "#f39c12", "#e67e22", "#e74c3c", "#8e44ad"]
     edge   = ["#1a8a4a", "#c07d0e", "#b56218", "#b03030", "#6c3483"]
@@ -326,7 +317,7 @@ def plot_confidence(ensemble_probs: np.ndarray, pred: int) -> io.BytesIO:
     ax.set_xlim(0, 112)
     ax.set_xlabel("Confiance (%)", fontsize=10, color="#555")
     ax.set_title(
-        "Distribution des probabilites — Ensemble pondere (4 modeles + TTA x4)",
+        "Distribution des probabilites — EfficientNet-B0 + TTA x4",
         fontsize=10, fontweight="bold", color="#1a1a2e", pad=8
     )
     ax.spines[["top", "right", "left"]].set_visible(False)
@@ -342,7 +333,6 @@ def plot_confidence(ensemble_probs: np.ndarray, pred: int) -> io.BytesIO:
     return buf
 
 
-# ─── Génération PDF ───────────────────────────────────────────────────────────
 def generate_pdf(
     patient_name: str, patient_age: str, doctor_name: str,
     pred: int, ensemble_probs: np.ndarray,
@@ -363,7 +353,6 @@ def generate_pdf(
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
 
-    # ── En-tete ──────────────────────────────────────────────────
     pdf.set_fill_color(26, 26, 46)
     pdf.rect(0, 0, 210, 33, "F")
     pdf.set_text_color(255, 255, 255)
@@ -391,7 +380,6 @@ def generate_pdf(
         pdf.set_text_color(0, 0, 0)
         pdf.set_y(41)
 
-    # ── Informations patient ──────────────────────────────────────
     pdf.set_fill_color(235, 240, 248)
     pdf.set_font("Helvetica", "B", 11)
     pdf.cell(0, 7, "  Informations Patient", ln=1, fill=True)
@@ -401,7 +389,7 @@ def generate_pdf(
         ("Age",           f"{patient_age} ans" if patient_age else "Non renseigne"),
         ("Medecin",       doctor_name or "Non renseigne"),
         ("Date analyse",  datetime.now().strftime("%d/%m/%Y a %H:%M")),
-        ("Methode",       "Ensemble 4 CNNs + TTA x4 vues" + (" (DEMO)" if is_demo else "")),
+        ("Methode",       "EfficientNet-B0 + TTA x4 vues" + (" (DEMO)" if is_demo else "")),
     ]
     for label, val in rows:
         pdf.set_font("Helvetica", "B", 9)
@@ -410,7 +398,6 @@ def generate_pdf(
         pdf.cell(0, 6, str(val), ln=1)
     pdf.ln(4)
 
-    # ── Bandeau diagnostic ────────────────────────────────────────
     pdf.set_fill_color(r, g, b)
     pdf.set_text_color(255, 255, 255)
     pdf.set_font("Helvetica", "B", 13)
@@ -429,10 +416,9 @@ def generate_pdf(
     pdf.multi_cell(0, 5, sev["rec"])
     pdf.ln(5)
 
-    # ── Tableau des scores ────────────────────────────────────────
     pdf.set_fill_color(235, 240, 248)
     pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(0, 7, "  Scores de confiance (ensemble 4 modeles + TTA)", ln=1, fill=True)
+    pdf.cell(0, 7, "  Scores de confiance (EfficientNet-B0 + TTA x4)", ln=1, fill=True)
     pdf.ln(2)
 
     pdf.set_fill_color(210, 220, 235)
@@ -458,7 +444,6 @@ def generate_pdf(
             pdf.set_text_color(0, 0, 0)
     pdf.ln(6)
 
-    # ── Images : ecriture dans des fichiers temporaires ───────────
     tmp_files = []
 
     def save_tmp(content_or_pil, suffix: str) -> str:
@@ -477,7 +462,6 @@ def generate_pdf(
     cam_path   = save_tmp(cam_buf.getvalue(), ".png")
     tmp_files  = [img_path, chart_path, cam_path]
 
-    # Image retinienne
     pdf.set_fill_color(235, 240, 248)
     pdf.set_font("Helvetica", "B", 11)
     pdf.cell(0, 7, "  Image de fond d'oeil analysee", ln=1, fill=True)
@@ -485,7 +469,6 @@ def generate_pdf(
     pdf.image(img_path, x=55, w=100)
     pdf.ln(4)
 
-    # Graphique probabilites
     pdf.set_fill_color(235, 240, 248)
     pdf.set_font("Helvetica", "B", 11)
     pdf.cell(0, 7, "  Distribution des probabilites par classe", ln=1, fill=True)
@@ -493,7 +476,6 @@ def generate_pdf(
     pdf.image(chart_path, x=8, w=194)
     pdf.ln(4)
 
-    # Grad-CAM
     pdf.set_fill_color(235, 240, 248)
     pdf.set_font("Helvetica", "B", 11)
     pdf.cell(0, 7, "  Interpretabilite - Grad-CAM (zones d'attention du reseau)", ln=1, fill=True)
@@ -501,7 +483,6 @@ def generate_pdf(
     pdf.image(cam_path, x=8, w=194)
     pdf.ln(4)
 
-    # Avertissement
     pdf.set_fill_color(255, 248, 220)
     pdf.set_text_color(120, 80, 10)
     pdf.set_font("Helvetica", "I", 7.5)
@@ -524,179 +505,169 @@ def generate_pdf(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ─── INTERFACE ────────────────────────────────────────────────────────────────
+# ─── Interface principale ─────────────────────────────────────────────────────
 # ══════════════════════════════════════════════════════════════════════════════
 
-# ── Chargement des modèles ────────────────────────────────────────────────────
-loaded_models, missing_models, device = load_models()
-demo_mode = len(loaded_models) == 0
+def show_main_ui():
+    loaded_models, missing_models, device = load_models()
+    demo_mode = len(loaded_models) == 0
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.markdown("## 👁️ RetinAI")
-    st.markdown("**Diagnostic Rétinopathie Diabétique**")
-    st.markdown("---")
-
-    # Statut modèles
-    if demo_mode:
-        st.warning("⚠️ Mode démonstration\nAucun modèle chargé.")
-    else:
-        st.success(f"✅ {len(loaded_models)}/4 modèles chargés\n`{device}`")
-
-    st.markdown("---")
-    st.markdown("### Modèles CNN")
-    for name in MODEL_NAMES:
-        p = MODEL_DIR / f"{name}_advanced.pth"
-        icon = "✅" if p.exists() else "❌"
-        acc  = f"{VAL_ACCS[name]*100:.1f}%" if p.exists() else "manquant"
-        st.markdown(f"{icon} **{name}** — {acc}")
-
-    st.markdown("---")
-    st.markdown("### Paramètres")
-    show_gradcam    = st.toggle("Afficher Grad-CAM", value=True)
-    cam_model_choice = st.selectbox(
-        "Modèle Grad-CAM",
-        options=[n for n in MODEL_NAMES if (MODEL_DIR / f"{n}_advanced.pth").exists()]
-                 or MODEL_NAMES,
-        index=0,
-        help="Architecture utilisée pour la carte de chaleur Grad-CAM"
-    )
-
-    st.markdown("---")
-    st.markdown("### Performances (notebook 06)")
-    st.info(
-        "Test set équilibré (250 images)\n\n"
-        "**Accuracy :** 99.6 %\n\n"
-        "**MAGE :** 0.016\n\n"
-        "**Within-1-grade :** 99.6 %"
-    )
-
-    if not demo_mode:
+    with st.sidebar:
+        st.markdown("## 👁️ RetinAI")
+        st.markdown("**Diagnostic Rétinopathie Diabétique**")
         st.markdown("---")
-        st.caption(
-            "Pour obtenir les poids :\n"
-            "Exécuter `06_final_dataset2_best_results_996pct.ipynb` "
-            "sur Kaggle → onglet *Output* → télécharger les `.pth`"
+
+        if demo_mode:
+            st.warning("⚠️ Mode démonstration\nAucun modèle chargé.")
+        else:
+            st.success(f"✅ {len(loaded_models)}/4 modèles chargés\n`{device}`")
+
+        st.markdown("---")
+        st.markdown("### Modèle CNN")
+        for name in MODEL_NAMES:
+            p = MODEL_DIR / f"{name}_data2.pth"
+            icon = "✅" if p.exists() else "❌"
+            acc  = f"{VAL_ACCS[name]*100:.1f}%" if p.exists() else "manquant"
+            st.markdown(f"{icon} **{name}** — {acc}")
+
+        st.markdown("---")
+        st.markdown("### Paramètres")
+        show_gradcam = st.toggle("Afficher Grad-CAM", value=True)
+        cam_model_choice = st.selectbox(
+            "Modèle Grad-CAM",
+            options=[n for n in MODEL_NAMES if (MODEL_DIR / f"{n}_data2.pth").exists()]
+                     or MODEL_NAMES,
+            index=0,
         )
 
-# ── En-tête principal ─────────────────────────────────────────────────────────
-st.markdown(
-    '<div class="main-title">👁️ RetinAI — Diagnostic Rétinopathie Diabétique</div>',
-    unsafe_allow_html=True,
-)
-st.markdown(
-    '<div class="sub-title">'
-    "Ensemble 4 CNNs &nbsp;·&nbsp; Test-Time Augmentation ×4 &nbsp;·&nbsp; "
-    "Grad-CAM &nbsp;·&nbsp; Rapport PDF &nbsp;·&nbsp; 2× Tesla T4"
-    "</div>",
-    unsafe_allow_html=True,
-)
+        st.markdown("---")
+        st.markdown("### Approche (Draft_data2)")
+        st.info(
+            "APTOS 2019 · split équilibré\n\n"
+            "**Test :** 250 images (50/classe)\n\n"
+            "**Modèle :** EfficientNet-B0\n\n"
+            "**Anti-surapprentissage :**\n"
+            "label smoothing · weight decay\n"
+            "early stopping · cosine LR"
+        )
 
-if demo_mode:
-    st.markdown("""
-    <div class="demo-banner">
-    🎓 <strong>Mode démonstration actif</strong> — Les fichiers <code>.pth</code> ne sont pas
-    présents dans <code>models/</code>. Les prédictions affichées sont <em>simulées</em>
-    pour permettre de visualiser l'interface. Placez les vrais poids pour activer l'analyse réelle.
-    </div>
-    """, unsafe_allow_html=True)
+        if not demo_mode:
+            st.markdown("---")
+            st.caption(
+                "Pour obtenir le poids :\n"
+                "Exécuter `Draft_data2_notebook.ipynb` "
+                "sur Kaggle → télécharger `efficientnet_b0_data2.pth` "
+                "→ placer dans `models/`"
+            )
 
-# ── Informations patient ──────────────────────────────────────────────────────
-st.markdown(
-    '<div class="section-header">📋 Informations Patient (optionnel)</div>',
-    unsafe_allow_html=True,
-)
-c1, c2, c3 = st.columns(3)
-with c1:
-    patient_name = st.text_input("Nom du patient", placeholder="Ex : Jean Dupont")
-with c2:
-    patient_age = st.text_input("Âge", placeholder="Ex : 58")
-with c3:
-    doctor_name = st.text_input("Médecin référent", placeholder="Dr. ...")
+    # ── En-tête
+    st.markdown(
+        '<div class="main-title">👁️ RetinAI — Diagnostic Rétinopathie Diabétique</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="sub-title">'
+        "EfficientNet-B0 &nbsp;·&nbsp; Test-Time Augmentation ×4 &nbsp;·&nbsp; "
+        "Grad-CAM &nbsp;·&nbsp; Rapport PDF &nbsp;·&nbsp; APTOS 2019"
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
-# ── Upload image ──────────────────────────────────────────────────────────────
-st.markdown(
-    '<div class="section-header">🖼️ Image de fond d\'œil</div>',
-    unsafe_allow_html=True,
-)
-
-uploaded = st.file_uploader(
-    "Glissez-deposez ou cliquez pour charger une image de retine",
-    type=["png", "jpg", "jpeg"],
-    label_visibility="collapsed",
-)
-
-if not uploaded:
-    st.markdown("""
-    <div class="upload-hint">
-        <div style="font-size:3rem">🩺</div>
-        <h4 style="color:#3498db;margin:0.5rem 0 0.3rem">
-            Glissez-déposez une image fundus ici
-        </h4>
-        <p style="margin:0;color:#999;font-size:0.9rem">
-            Formats acceptés : PNG &nbsp;·&nbsp; JPG &nbsp;·&nbsp; JPEG
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
-    st.stop()
-
-# Réinitialiser si nouvelle image
-file_id = uploaded.file_id if hasattr(uploaded, "file_id") else uploaded.name
-if file_id != st.session_state.last_file_id:
-    st.session_state.analysis_done = False
-    st.session_state.pred = None
-    st.session_state.last_file_id = file_id
-
-img_pil = Image.open(uploaded).convert("RGB")
-
-# ── Aperçu image ──────────────────────────────────────────────────────────────
-col_img, col_meta = st.columns([1, 2])
-with col_img:
-    st.image(img_pil, caption="Image chargée", use_container_width=True)
-with col_meta:
-    st.markdown("**Détails de l'image**")
-    st.write(f"- **Dimensions :** {img_pil.size[0]} × {img_pil.size[1]} px")
-    st.write(f"- **Format :** {uploaded.type}")
-    st.write(f"- **Taille fichier :** {uploaded.size / 1024:.1f} Ko")
     if demo_mode:
-        st.write("- **Modèle :** ⚠️ Mode démonstration")
-    else:
-        st.write(f"- **Modèles actifs :** {', '.join(loaded_models.keys())}")
-    st.caption(
-        "L'image sera redimensionnée en 224×224 px. "
-        "TTA appliqué sur 4 vues : original, flip H, flip V, rotation 180°."
+        st.markdown("""
+        <div class="demo-banner">
+        🎓 <strong>Mode démonstration actif</strong> — Les fichiers <code>.pth</code> ne sont pas
+        présents dans <code>models/</code>. Les prédictions affichées sont <em>simulées</em>
+        pour permettre de visualiser l'interface.
+        </div>
+        """, unsafe_allow_html=True)
+
+    # ── Informations patient
+    st.markdown('<div class="section-header">📋 Informations Patient</div>', unsafe_allow_html=True)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        patient_name = st.text_input("Nom du patient", placeholder="Ex : Jean Dupont")
+    with c2:
+        patient_age = st.text_input("Âge", placeholder="Ex : 58")
+    with c3:
+        doctor_name = st.text_input("Médecin référent", placeholder="Dr. ...")
+
+    # ── Upload
+    st.markdown('<div class="section-header">🖼️ Image de fond d\'œil</div>', unsafe_allow_html=True)
+    uploaded = st.file_uploader(
+        "Glissez-deposez ou cliquez pour charger une image de retine",
+        type=["png", "jpg", "jpeg"],
+        label_visibility="collapsed",
     )
 
-# ── Bouton Analyser ───────────────────────────────────────────────────────────
-st.markdown("---")
-col_btn, col_reset = st.columns([4, 1])
-with col_btn:
-    run = st.button(
-        "🔍 Lancer l'analyse" + (" (DEMO)" if demo_mode else ""),
-        type="primary", use_container_width=True,
-    )
-with col_reset:
-    if st.button("🔄 Reset", use_container_width=True) and st.session_state.analysis_done:
+    if not uploaded:
+        st.markdown("""
+        <div class="upload-hint">
+            <div style="font-size:3rem">🩺</div>
+            <h4 style="color:#3498db;margin:0.5rem 0 0.3rem">
+                Glissez-déposez une image fundus ici
+            </h4>
+            <p style="margin:0;color:#999;font-size:0.9rem">
+                Formats acceptés : PNG &nbsp;·&nbsp; JPG &nbsp;·&nbsp; JPEG
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+        st.stop()
+
+    file_id = uploaded.file_id if hasattr(uploaded, "file_id") else uploaded.name
+    if file_id != st.session_state.last_file_id:
         st.session_state.analysis_done = False
-        st.rerun()
+        st.session_state.pred          = None
+        st.session_state.last_file_id  = file_id
 
-# ── Lancement de l'analyse ────────────────────────────────────────────────────
-if run:
-    with st.spinner("Inférence en cours…"):
+    img_pil = Image.open(uploaded).convert("RGB")
+
+    col_img, col_meta = st.columns([1, 2])
+    with col_img:
+        st.image(img_pil, caption="Image chargée", use_container_width=True)
+    with col_meta:
+        st.markdown("**Détails de l'image**")
+        st.write(f"- **Dimensions :** {img_pil.size[0]} × {img_pil.size[1]} px")
+        st.write(f"- **Format :** {uploaded.type}")
+        st.write(f"- **Taille fichier :** {uploaded.size / 1024:.1f} Ko")
         if demo_mode:
-            pred, ensemble_probs, per_model_probs = demo_predict(img_pil)
+            st.write("- **Modèle :** ⚠️ Mode démonstration")
         else:
-            pred, ensemble_probs, per_model_probs = predict(img_pil, loaded_models, device)
+            st.write(f"- **Modèles actifs :** {', '.join(loaded_models.keys())}")
+        st.caption(
+            "L'image sera redimensionnée en 224×224 px. "
+            "TTA appliqué sur 4 vues : original, flip H, flip V, rotation 180°."
+        )
 
-    st.session_state.pred            = pred
-    st.session_state.ensemble_probs  = ensemble_probs
-    st.session_state.per_model_probs = per_model_probs
-    st.session_state.analysis_done   = True
+    st.markdown("---")
+    col_btn, col_reset = st.columns([4, 1])
+    with col_btn:
+        run = st.button(
+            "🔍 Lancer l'analyse" + (" (DEMO)" if demo_mode else ""),
+            type="primary", use_container_width=True,
+        )
+    with col_reset:
+        if st.button("🔄 Reset", use_container_width=True) and st.session_state.analysis_done:
+            st.session_state.analysis_done = False
+            st.rerun()
 
-# ── Affichage des résultats ───────────────────────────────────────────────────
-if st.session_state.analysis_done:
-    pred           = st.session_state.pred
-    ensemble_probs = st.session_state.ensemble_probs
+    if run:
+        with st.spinner("Inférence en cours…"):
+            if demo_mode:
+                pred, ensemble_probs, per_model_probs = demo_predict(img_pil)
+            else:
+                pred, ensemble_probs, per_model_probs = predict(img_pil, loaded_models, device)
+        st.session_state.pred            = pred
+        st.session_state.ensemble_probs  = ensemble_probs
+        st.session_state.per_model_probs = per_model_probs
+        st.session_state.analysis_done   = True
+        st.session_state.pdf_saved       = False
+
+    if not st.session_state.analysis_done:
+        return
+
+    pred            = st.session_state.pred
+    ensemble_probs  = st.session_state.ensemble_probs
     per_model_probs = st.session_state.per_model_probs
     sev = SEV[pred]
 
@@ -706,7 +677,6 @@ if st.session_state.analysis_done:
     }
     urg_col = urg_colors[sev["urgency"]]
 
-    # ── Carte de diagnostic ───────────────────────────────────────
     st.markdown("### 📊 Résultats du diagnostic")
     st.markdown(f"""
     <div class="diag-card"
@@ -724,23 +694,18 @@ if st.session_state.analysis_done:
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Métriques ─────────────────────────────────────────────────
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Grade prédit",        f"{pred} / 4")
-    m2.metric("Confiance ensemble",  f"{ensemble_probs[pred]*100:.1f} %")
-    m3.metric("Modèles en accord",   len(per_model_probs))
-    m4.metric("Vues TTA",            4)
+    m1.metric("Grade prédit",       f"{pred} / 4")
+    m2.metric("Confiance modèle",   f"{ensemble_probs[pred]*100:.1f} %")
+    m3.metric("Modèle",             "EfficientNet-B0")
+    m4.metric("Vues TTA",           4)
 
-    # ── Graphique de confiance ────────────────────────────────────
-    st.markdown(
-        '<div class="section-header">📈 Distribution des probabilités</div>',
-        unsafe_allow_html=True,
-    )
+    st.markdown('<div class="section-header">📈 Distribution des probabilités</div>',
+                unsafe_allow_html=True)
     chart_buf = plot_confidence(ensemble_probs, pred)
     st.image(chart_buf, use_container_width=True)
 
-    # ── Vote détaillé par modèle ──────────────────────────────────
-    with st.expander("🔬 Vote détaillé par modèle (TTA inclus)"):
+    with st.expander("🔬 Détail des probabilités par classe (TTA inclus)"):
         detail_cols = st.columns(len(per_model_probs))
         for col, (name, probs) in zip(detail_cols, per_model_probs.items()):
             mp = int(probs.argmax())
@@ -751,12 +716,9 @@ if st.session_state.analysis_done:
                 for i, (cls_ui, p) in enumerate(zip(CLASSES_UI, probs)):
                     st.progress(float(p), text=f"G{i}: {p*100:.0f}%")
 
-    # ── Grad-CAM ─────────────────────────────────────────────────
     if show_gradcam:
-        st.markdown(
-            '<div class="section-header">🔬 Interprétabilité — Grad-CAM</div>',
-            unsafe_allow_html=True,
-        )
+        st.markdown('<div class="section-header">🔬 Interprétabilité — Grad-CAM</div>',
+                    unsafe_allow_html=True)
         st.caption(
             "Les zones **rouges / chaudes** indiquent les régions rétiniennes qui ont "
             "le plus influencé la décision du réseau. Un modèle fiable active sur les "
@@ -769,10 +731,8 @@ if st.session_state.analysis_done:
                 cam_m = cam_model_choice if cam_model_choice in loaded_models \
                         else next(iter(loaded_models))
                 cam_buf = compute_gradcam_fig(img_pil, loaded_models[cam_m], cam_m, device, pred)
-
         st.image(cam_buf, use_container_width=True)
     else:
-        # Toujours calculer pour le PDF, même si non affiché
         if demo_mode:
             cam_buf = demo_gradcam_fig(img_pil)
         else:
@@ -780,12 +740,10 @@ if st.session_state.analysis_done:
                     else next(iter(loaded_models))
             cam_buf = compute_gradcam_fig(img_pil, loaded_models[cam_m], cam_m, device, pred)
 
-    # ── Rapport PDF ───────────────────────────────────────────────
+    # ── Rapport PDF
     st.markdown("---")
-    st.markdown(
-        '<div class="section-header">📄 Rapport PDF du diagnostic</div>',
-        unsafe_allow_html=True,
-    )
+    st.markdown('<div class="section-header">📄 Rapport PDF du diagnostic</div>',
+                unsafe_allow_html=True)
 
     chart_buf.seek(0)
     cam_buf.seek(0)
@@ -818,9 +776,7 @@ if st.session_state.analysis_done:
 
     except Exception as e:
         st.warning(f"Erreur PDF : {e}")
-        st.info("Vérifiez que `fpdf2` est installé : `pip install fpdf2`")
 
-    # ── Avertissement médical ─────────────────────────────────────
     st.markdown("""
     <div class="disclaimer">
     ⚠️ <strong>Avertissement médical :</strong>
@@ -829,3 +785,10 @@ if st.session_state.analysis_done:
     Toute décision thérapeutique doit être validée par un professionnel de santé habilité.
     </div>
     """, unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ─── Point d'entrée ───────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+
+show_main_ui()
